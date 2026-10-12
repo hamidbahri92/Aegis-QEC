@@ -296,3 +296,29 @@ def test_recovery_discards_uncommitted_chunk_journal(tmp_path):
     baseline = generate_qec_dataset(str(control), **params)
     assert resumed["syndromes_sha256"] == baseline["syndromes_sha256"]
     assert inspect_qec_dataset(str(path))["valid"] is True
+
+
+
+def test_final_short_chunk_recovers_after_interrupted_completion(tmp_path):
+    path = tmp_path / "completed-but-unmarked.h5"
+    reference = tmp_path / "reference-short.h5"
+    params = dict(
+        shots=22, seed=98204, chunk_size=8, distance=3,
+        physical_error_rate=0.02,
+    )
+    generate_qec_dataset(str(path), **params)
+    with h5py.File(path, "r+") as handle:
+        # This is the durable state after the final chunk's commit but
+        # before the overall complete=True metadata has been written.
+        handle.attrs["complete"] = False
+        for name in ("syndromes_sha256", "observables_sha256", "split_sha256"):
+            del handle.attrs[name]
+        assert int(handle.attrs["written_shots"]) == 22
+        assert len(handle["chunk_sha256"]) == 3
+    recovered = generate_qec_dataset(str(path), **params)
+    expected = generate_qec_dataset(str(reference), **params)
+    assert recovered["complete"] is True
+    assert recovered["new_chunks"] == 0
+    for name in ("syndromes_sha256", "observables_sha256", "split_sha256"):
+        assert recovered[name] == expected[name]
+    assert inspect_qec_dataset(str(path))["valid"] is True
