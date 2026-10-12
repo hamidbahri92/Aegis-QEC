@@ -21,7 +21,11 @@ import numpy as np
 import pymatching
 import stim
 
-from aegis_qec.dataset import generate_qec_dataset, inspect_qec_dataset
+from aegis_qec.dataset import (
+    evaluate_decoders_on_dataset,
+    generate_qec_dataset,
+    inspect_qec_dataset,
+)
 from aegis_qec.research import run_surface_code_study
 
 
@@ -94,6 +98,49 @@ def _qualify_dataset(base: Path, shots: int) -> dict:
     assert left["valid"] and right["valid"] and left["complete"] and right["complete"]
     for name in ("identity_sha256", "syndromes_sha256", "observables_sha256", "split_sha256"):
         assert left[name] == right[name], f"resumption changes {name}"
+    # Cross-validate fixed-test-split evaluation over radically different
+    # batch partitions and compare the primary decoder to standalone PyMatching.
+    decoders = ["aegis-pymatching", "aegis-pymatching-correlated"]
+    small_batch = evaluate_decoders_on_dataset(
+        str(continuous_path), decoders=decoders,
+        split_name="test", batch_size=137,
+    )
+    large_batch = evaluate_decoders_on_dataset(
+        str(continuous_path), decoders=decoders,
+        split_name="test", batch_size=4096,
+    )
+    assert small_batch["dataset"]["selected_shots"] > 0
+    for name in ("selected_shots", "selected_syndromes_sha256",
+                 "selected_observables_sha256"):
+        assert small_batch["dataset"][name] == large_batch["dataset"][name]
+    assert [
+        (row["decoder"], row["shots"], row["errors"])
+        for row in small_batch["rows"]
+    ] == [
+        (row["decoder"], row["shots"], row["errors"])
+        for row in large_batch["rows"]
+    ]
+    assert small_batch["pairwise_disagreements"] == large_batch["pairwise_disagreements"]
+    assert small_batch["paired_failure_statistics"] == large_batch["paired_failure_statistics"]
+    with h5py.File(continuous_path, "r") as handle:
+        mask = np.asarray(handle["split"][:]) == 2
+        detector_shots = np.asarray(handle["syndromes"][:][mask], dtype=np.uint8)
+        observable_shots = np.asarray(handle["observables"][:][mask], dtype=np.uint8)
+        dem_value = handle["decoding_detector_error_model"][()]
+        if isinstance(dem_value, bytes):
+            dem_value = dem_value.decode("utf-8")
+    dem = stim.DetectorErrorModel(str(dem_value))
+    predictions = pymatching.Matching.from_detector_error_model(dem).decode_batch(
+        detector_shots
+    )
+    expected_failures = int(np.count_nonzero(np.any(
+        predictions != observable_shots, axis=1
+    )))
+    base_row = next(
+        row for row in small_batch["rows"]
+        if row["decoder"] == "aegis-pymatching"
+    )
+    assert base_row["errors"] == expected_failures
     tampered_path = base / "dataset-tampered.h5"
     shutil.copy2(resumed_path, tampered_path)
     with h5py.File(tampered_path, "r+") as handle:
@@ -102,11 +149,21 @@ def _qualify_dataset(base: Path, shots: int) -> dict:
     corrupted = inspect_qec_dataset(str(tampered_path))
     assert not corrupted["valid"], "tampered dataset was accepted"
     assert any("syndromes_sha256 mismatch" in item for item in corrupted["failures"])
+    try:
+        generate_qec_dataset(str(tampered_path), **common)
+    except ValueError as exc:
+        assert "integrity mismatch" in str(exc)
+    else:
+        raise AssertionError("tampered completed dataset was silently recertified")
     return {
         "shots": shots, "resumed_sha256": resumed["syndromes_sha256"],
         "continuous_sha256": continuous["syndromes_sha256"],
         "resume_equal": True, "tamper_rejected": True,
         "split_counts": right["split_counts"],
+        "fixed_test_shots": small_batch["dataset"]["selected_shots"],
+        "independent_pymatching_failures": expected_failures,
+        "paired_decoder_statistics": small_batch["paired_failure_statistics"],
+        "batch_size_invariance": True,
     }
 
 
@@ -122,6 +179,9 @@ def qualify(output: Path, *, shots_per_point: int, dataset_shots: int) -> None:
     report: dict = {
         "type": "aegis_independent_scientific_qualification",
         "source": "pinned GitHub checkout",
+        "commit_sha": os.environ.get("GITHUB_SHA"),
+        "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+        "numpy_version": np.__version__,
         "stim_version": stim.__version__,
         "pymatching_version": pymatching.__version__,
         "python": platform.python_version(),
@@ -133,42 +193,43 @@ def qualify(output: Path, *, shots_per_point: int, dataset_shots: int) -> None:
         "status": "RUNNING",
     }
     _persist_json(output, report)
-    for seed in seeds:
-        study = run_surface_code_study(
-            distances=distances,
-            physical_error_rates=probabilities,
-            shots=shots_per_point,
-            basis="x",
-            seed=seed,
-        )
-        rows = study["points"]
-        assert len(rows) == len(distances) * len(probabilities)
-        for index, row in enumerate(rows):
-            ref = _reference_point(
-                int(row["distance"]), float(row["physical_error_rate"]),
-                seed + index, shots_per_point, "x",
+    for basis in ("x", "z"):
+        for seed in seeds:
+            study = run_surface_code_study(
+                distances=distances,
+                physical_error_rates=probabilities,
+                shots=shots_per_point,
+                basis=basis,
+                seed=seed,
             )
-            for name, ref_name in (
-                ("logical_failures", "errors"), ("circuit_sha256", "circuit_sha256"),
-                ("dem_sha256", "dem_sha256"), ("detectors", "detectors"),
-                ("observables", "observables"), ("seed", "seed"),
-            ):
-                assert row[name] == ref[ref_name], f"oracle mismatch for {name} at {seed}:{index}"
-            assert row["ci95_low"] <= row["logical_error_rate"] <= row["ci95_high"]
-            assert 0 <= row["logical_failures"] <= row["shots"]
-            report["results"].append({
-                "index": index, "base_seed": seed,
-                "distance": ref["distance"], "p": ref["physical_error_rate"],
-                "shots": ref["shots"], "logical_failures": ref["errors"],
-                "logical_error_rate": ref["rate"],
-                "aegis_ci95": [row["ci95_low"], row["ci95_high"]],
-                "detector_sha256": ref["detector_samples_sha256"],
-                "observables_sha256": ref["observable_samples_sha256"],
-                "oracle_exact": True,
-            })
-            _persist_json(output, report)
+            rows = study["points"]
+            assert len(rows) == len(distances) * len(probabilities)
+            for index, row in enumerate(rows):
+                ref = _reference_point(
+                    int(row["distance"]), float(row["physical_error_rate"]),
+                    seed + index, shots_per_point, basis,
+                )
+                for name, ref_name in (
+                    ("logical_failures", "errors"), ("circuit_sha256", "circuit_sha256"),
+                    ("dem_sha256", "dem_sha256"), ("detectors", "detectors"),
+                    ("observables", "observables"), ("seed", "seed"),
+                ):
+                    assert row[name] == ref[ref_name], f"oracle mismatch for {name} at {seed}:{index}"
+                assert row["ci95_low"] <= row["logical_error_rate"] <= row["ci95_high"]
+                assert 0 <= row["logical_failures"] <= row["shots"]
+                report["results"].append({
+                    "index": index, "base_seed": seed, "basis": basis,
+                    "distance": ref["distance"], "p": ref["physical_error_rate"],
+                    "shots": ref["shots"], "logical_failures": ref["errors"],
+                    "logical_error_rate": ref["rate"],
+                    "aegis_ci95": [row["ci95_low"], row["ci95_high"]],
+                    "detector_sha256": ref["detector_samples_sha256"],
+                    "observables_sha256": ref["observable_samples_sha256"],
+                    "oracle_exact": True,
+                })
+                _persist_json(output, report)
     report["dataset"] = _qualify_dataset(base, dataset_shots)
-    report["total_sampled_shots"] = shots_per_point * len(distances) * len(probabilities) * len(seeds)
+    report["total_sampled_shots"] = shots_per_point * len(distances) * len(probabilities) * len(seeds) * 2
     report["status"] = "PASS"
     report["elapsed_seconds"] = time.perf_counter() - started
     _persist_json(output, report)
