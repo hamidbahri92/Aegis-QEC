@@ -1,0 +1,50 @@
+name: aegis-extended-portability
+
+on:
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aegis-extended-portability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  expanded-compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install end-user distribution and QA tools
+        run: python -m pip install ".[full,gui]" pytest ruff
+      - name: Check all Python source defect lint
+        run: python -m ruff check --select F,B .
+      - name: Run full scientific and research application tests
+        run: python -m pytest -q
+      - name: Exercise installed end-user commands
+        run: |
+          aegis --version
+          aegis doctor --json
+          aegis demo --distance 3 --rounds 3 --error-probability 0
+          aegis study --distance 3 --p 0.01 --shots 128 --basis z --seed 47 --out-json portability-study.json
+      - name: Publish portable reproducibility record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portability-${{ matrix.os }}-py${{ matrix.python-version }}-${{ github.run_id }}
+          path: portability-study.json
+          if-no-files-found: warn
+          retention-days: 30

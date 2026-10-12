@@ -221,3 +221,104 @@ def test_partial_dataset_does_not_invent_lost_committed_rows(tmp_path):
         )
     with pytest.raises(RuntimeError, match="committed dataset rows are missing"):
         generate_qec_dataset(str(path), **params)
+
+
+
+def test_partial_dataset_tampering_is_detected_before_resumption(tmp_path):
+    path = tmp_path / "partial-tampered.h5"
+    params = dict(
+        shots=32, chunk_size=8, seed=78623, distance=3,
+        physical_error_rate=0.02,
+    )
+    first = generate_qec_dataset(
+        str(path), max_chunks_per_run=2, **params
+    )
+    assert first["written_shots"] == 16
+    assert inspect_qec_dataset(str(path))["valid"] is True
+    with h5py.File(path, "r+") as handle:
+        assert len(handle["chunk_sha256"]) == 2
+        handle["syndromes"][0, 0] = not bool(handle["syndromes"][0, 0])
+    verified = inspect_qec_dataset(str(path))
+    assert verified["valid"] is False
+    assert any("committed chunk integrity mismatch" in item
+               for item in verified["failures"])
+    with pytest.raises(ValueError, match="committed chunk integrity mismatch"):
+        generate_qec_dataset(str(path), **params)
+    assert inspect_qec_dataset(str(path))["valid"] is False
+
+
+def test_legacy_partial_dataset_is_qualified_by_replay_before_resume(tmp_path):
+    path = tmp_path / "legacy.h5"
+    reference = tmp_path / "reference.h5"
+    params = dict(
+        shots=32, chunk_size=8, seed=97231, distance=3,
+        physical_error_rate=0.02,
+    )
+    generate_qec_dataset(str(path), max_chunks_per_run=2, **params)
+    with h5py.File(path, "r+") as handle:
+        del handle["chunk_sha256"]
+    assert inspect_qec_dataset(str(path))["valid"] is False
+    completed = generate_qec_dataset(str(path), **params)
+    expected = generate_qec_dataset(str(reference), **params)
+    for item in ("syndromes_sha256", "observables_sha256", "split_sha256"):
+        assert completed[item] == expected[item]
+    assert inspect_qec_dataset(str(path))["valid"] is True
+
+
+def test_legacy_replay_rejects_mutated_partial_file(tmp_path):
+    path = tmp_path / "legacy-corrupt.h5"
+    params = dict(
+        shots=32, chunk_size=8, seed=732, distance=3,
+        physical_error_rate=0.02,
+    )
+    generate_qec_dataset(str(path), max_chunks_per_run=1, **params)
+    with h5py.File(path, "r+") as handle:
+        del handle["chunk_sha256"]
+        handle["observables"][0, 0] = not bool(handle["observables"][0, 0])
+    with pytest.raises(ValueError, match="legacy dataset committed chunk replay mismatch"):
+        generate_qec_dataset(str(path), **params)
+
+
+def test_recovery_discards_uncommitted_chunk_journal(tmp_path):
+    path = tmp_path / "journal-interrupt.h5"
+    control = tmp_path / "journal-control.h5"
+    params = dict(
+        shots=32, chunk_size=8, seed=892, distance=3,
+        physical_error_rate=0.02,
+    )
+    generate_qec_dataset(str(path), max_chunks_per_run=1, **params)
+    with h5py.File(path, "r+") as handle:
+        handle["syndromes"].resize((9, handle["syndromes"].shape[1]))
+        journal = handle["chunk_sha256"]
+        journal.resize((2,))
+        journal[1] = b"0" * 64
+    resumed = generate_qec_dataset(str(path), **params)
+    baseline = generate_qec_dataset(str(control), **params)
+    assert resumed["syndromes_sha256"] == baseline["syndromes_sha256"]
+    assert inspect_qec_dataset(str(path))["valid"] is True
+
+
+
+def test_final_short_chunk_recovers_after_interrupted_completion(tmp_path):
+    path = tmp_path / "completed-but-unmarked.h5"
+    reference = tmp_path / "reference-short.h5"
+    params = dict(
+        shots=22, seed=98204, chunk_size=8, distance=3,
+        physical_error_rate=0.02,
+    )
+    generate_qec_dataset(str(path), **params)
+    with h5py.File(path, "r+") as handle:
+        # This is the durable state after the final chunk's commit but
+        # before the overall complete=True metadata has been written.
+        handle.attrs["complete"] = False
+        for name in ("syndromes_sha256", "observables_sha256", "split_sha256"):
+            del handle.attrs[name]
+        assert int(handle.attrs["written_shots"]) == 22
+        assert len(handle["chunk_sha256"]) == 3
+    recovered = generate_qec_dataset(str(path), **params)
+    expected = generate_qec_dataset(str(reference), **params)
+    assert recovered["complete"] is True
+    assert recovered["new_chunks"] == 0
+    for name in ("syndromes_sha256", "observables_sha256", "split_sha256"):
+        assert recovered[name] == expected[name]
+    assert inspect_qec_dataset(str(path))["valid"] is True

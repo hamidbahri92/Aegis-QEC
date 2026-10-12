@@ -27,6 +27,7 @@ from aegis_qec.dataset import (
     inspect_qec_dataset,
 )
 from aegis_qec.research import run_surface_code_study
+from aegis_qec.scaling import fit_surface_code_scaling
 
 
 def _hash(value: str) -> str:
@@ -228,6 +229,36 @@ def qualify(output: Path, *, shots_per_point: int, dataset_shots: int) -> None:
                     "oracle_exact": True,
                 })
                 _persist_json(output, report)
+    # Fit the *actual sampled data* as a numerical pipeline acceptance test.
+    # This is a first-order model diagnostic, not a claimed physical threshold.
+    report["scaling_diagnostics"] = {}
+    for basis in ("x", "z"):
+        rows = []
+        for point in report["results"]:
+            if point["basis"] != basis:
+                continue
+            rows.append({
+                "decoder": "aegis-pymatching",
+                "metadata": {
+                    "distance": point["distance"],
+                    "physical_error_rate": point["p"],
+                },
+                "accepted_shots": point["shots"],
+                "errors": point["logical_failures"],
+            })
+        fitted = fit_surface_code_scaling(
+            {"rows": rows}, decoder="aegis-pymatching",
+            pc_grid_points=31, nu_grid_points=15,
+        )
+        ci_low, ci_high = fitted["critical_probability_ci95_profile"]
+        pc = fitted["critical_probability"]
+        assert np.isfinite(pc) and ci_low <= pc <= ci_high
+        assert fitted["points_used"] == len(rows)
+        assert fitted["total_shots"] == sum(row["accepted_shots"] for row in rows)
+        assert fitted["total_logical_failures"] == sum(row["errors"] for row in rows)
+        report["scaling_diagnostics"][basis] = fitted
+        _persist_json(output, report)
+
     report["dataset"] = _qualify_dataset(base, dataset_shots)
     report["total_sampled_shots"] = shots_per_point * len(distances) * len(probabilities) * len(seeds) * 2
     report["status"] = "PASS"
@@ -238,6 +269,7 @@ def qualify(output: Path, *, shots_per_point: int, dataset_shots: int) -> None:
         "sampled_shots_per_engine": report["total_sampled_shots"],
         "oracle_matched_points": len(report["results"]),
         "dataset_resume_equal": report["dataset"]["resume_equal"],
+        "scaling_model_diagnostics": list(report["scaling_diagnostics"]),
         "tamper_rejected": report["dataset"]["tamper_rejected"],
         "evidence": str(output),
     }, sort_keys=True))

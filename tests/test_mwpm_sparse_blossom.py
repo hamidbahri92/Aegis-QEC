@@ -133,3 +133,25 @@ def test_fault_vector_mapping_matches_pymatching_edge_oracle():
             for edge in result.corrections
         )
         assert actual == expected
+
+
+
+def test_batch_accepts_numpy_detector_matrix_without_truth_ambiguity():
+    import numpy as np
+
+    graph = DecodingGraph(
+        nodes=[0, 1],
+        edges=[Edge(0, 1, 1.0, "space")],
+        node_meta={
+            0: ("X", None, 0, "stab"),
+            1: ("X", None, 0, "stab"),
+        },
+    )
+    samples = np.asarray([[1, 1], [0, 0]], dtype=np.uint8)
+    results = MWPMDecoder().decode_batch(graph, samples)
+    assert len(results) == 2
+    assert results[0].corrections == graph.edges
+    assert results[1].corrections == []
+    assert MWPMDecoder().decode_batch(
+        graph, np.empty((0, 2), dtype=np.uint8)
+    ) == []

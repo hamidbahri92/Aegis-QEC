@@ -186,7 +186,7 @@ class MWPMDecoder:
         syndrome_batch: Sequence[Sequence[int]],
     ) -> List[DecodeResult]:
         """Decode many syndromes with one compiled sparse-blossom graph."""
-        if not syndrome_batch:
+        if len(syndrome_batch) == 0:
             return []
         compiled = self._compile(graph)
         shots = np.stack(
