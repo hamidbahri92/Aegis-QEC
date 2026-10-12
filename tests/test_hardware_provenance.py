@@ -41,9 +41,17 @@ def test_ibm_partial_backend_record_exposes_every_unmeasured_field():
         gates = [
             SimpleNamespace(
                 gate="cx",
-                parameters=[SimpleNamespace(value=0.008)],
+                qubits=[0, 1],
+                parameters=[
+                    SimpleNamespace(name="gate_length", value=4e-7),
+                    SimpleNamespace(name="gate_error", value=0.008),
+                ],
             )
         ]
+
+        def gate_error(self, gate, qubits):
+            assert gate == "cx" and qubits == [0, 1]
+            return 0.008
 
         def t1(self, qubit):
             return 45e-6 + qubit * 1e-6
@@ -93,3 +101,30 @@ def test_cached_calibration_reports_staleness():
     assert fresh["stale"] is False
     assert stale["stale"] is True
     assert stale["cache_age_seconds"] == 20.0
+
+
+
+def test_ibm_gate_error_named_parameter_is_not_confused_with_gate_duration():
+    from types import SimpleNamespace
+
+    class Props:
+        gates = [
+            SimpleNamespace(
+                gate="cz",
+                parameters=[
+                    SimpleNamespace(name="gate_length", value=2e-7),
+                    SimpleNamespace(name="gate_error", value=0.012),
+                ],
+            )
+        ]
+
+        def t1(self, qubit):
+            return 40e-6
+
+        def t2(self, qubit):
+            return 30e-6
+
+    calibration = IBMQuantumInterface("named-parameter")._extract_calibration(
+        Props(), SimpleNamespace(n_qubits=2, coupling_map=[(0, 1)])
+    )
+    assert calibration["base_error_rate"] == pytest.approx(0.012)
