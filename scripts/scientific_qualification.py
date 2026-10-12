@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -93,10 +94,12 @@ def _qualify_dataset(base: Path, shots: int) -> dict:
     assert left["valid"] and right["valid"] and left["complete"] and right["complete"]
     for name in ("identity_sha256", "syndromes_sha256", "observables_sha256", "split_sha256"):
         assert left[name] == right[name], f"resumption changes {name}"
-    with h5py.File(resumed_path, "r+") as handle:
+    tampered_path = base / "dataset-tampered.h5"
+    shutil.copy2(resumed_path, tampered_path)
+    with h5py.File(tampered_path, "r+") as handle:
         old = bool(handle["syndromes"][0, 0])
         handle["syndromes"][0, 0] = not old
-    corrupted = inspect_qec_dataset(str(resumed_path))
+    corrupted = inspect_qec_dataset(str(tampered_path))
     assert not corrupted["valid"], "tampered dataset was accepted"
     assert any("syndromes_sha256 mismatch" in item for item in corrupted["failures"])
     return {
