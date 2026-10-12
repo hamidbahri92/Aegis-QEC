@@ -156,3 +156,68 @@ def test_dense_mechanism_matrices_can_be_disabled(tmp_path):
         assert "obs_matrix" not in handle
         assert "error_mechanisms/detector_indices" in handle
         assert "error_mechanisms/observable_indices" in handle
+
+
+
+def test_reopening_complete_dataset_cannot_recertify_tampered_samples(tmp_path):
+    path = tmp_path / "signed.h5"
+    params = dict(
+        shots=24, seed=12941, chunk_size=8, distance=3,
+        physical_error_rate=0.02,
+    )
+    generate_qec_dataset(str(path), **params)
+    with h5py.File(path, "r+") as handle:
+        originally_stored = str(handle.attrs["syndromes_sha256"])
+        handle["syndromes"][0, 0] = not bool(handle["syndromes"][0, 0])
+    with pytest.raises(ValueError, match="completed dataset integrity mismatch"):
+        generate_qec_dataset(str(path), **params)
+    with h5py.File(path, "r") as handle:
+        assert str(handle.attrs["syndromes_sha256"]) == originally_stored
+    assert inspect_qec_dataset(str(path))["valid"] is False
+
+
+def test_partial_dataset_discards_uncommitted_append_after_interruption(tmp_path):
+    path = tmp_path / "interrupted.h5"
+    control = tmp_path / "uninterrupted.h5"
+    params = dict(
+        shots=40, seed=19847, chunk_size=8, distance=3,
+        physical_error_rate=0.02,
+    )
+    first = generate_qec_dataset(
+        str(path), max_chunks_per_run=1, **params
+    )
+    assert first["written_shots"] == 8
+    with h5py.File(path, "r+") as handle:
+        syndromes = handle["syndromes"]
+        syndromes.resize((10, syndromes.shape[1]))
+        syndromes[8:10, :] = False
+        observables = handle["observables"]
+        observables.resize((11, observables.shape[1]))
+        observables[8:11, :] = True
+        handle.flush()
+    recovered = generate_qec_dataset(str(path), **params)
+    reference = generate_qec_dataset(str(control), **params)
+    assert recovered["complete"] is True
+    for name in (
+        "identity_sha256", "syndromes_sha256",
+        "observables_sha256", "split_sha256",
+    ):
+        assert recovered[name] == reference[name]
+    assert inspect_qec_dataset(str(path))["valid"] is True
+
+
+def test_partial_dataset_does_not_invent_lost_committed_rows(tmp_path):
+    path = tmp_path / "lost-committed.h5"
+    params = dict(
+        shots=24, seed=2498, chunk_size=8, distance=3,
+        physical_error_rate=0.02,
+    )
+    generate_qec_dataset(
+        str(path), max_chunks_per_run=1, **params
+    )
+    with h5py.File(path, "r+") as handle:
+        handle["observables"].resize(
+            (7, handle["observables"].shape[1])
+        )
+    with pytest.raises(RuntimeError, match="committed dataset rows are missing"):
+        generate_qec_dataset(str(path), **params)
