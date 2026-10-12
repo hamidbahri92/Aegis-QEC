@@ -118,7 +118,7 @@ def verify_manifested_payload(
             if candidate.is_file() or candidate.is_symlink():
                 actual.add(candidate.relative_to(source).as_posix())
         for name in sorted(actual - set(entries) - reserved):
-            errors.append("unexpected payload: " + name)
+            errors.append(("unexpected entry: " if inventory_name == "entries" else "unexpected payload: ") + name)
         for name, item in entries.items():
             parts = name.split("/")
             target = source.joinpath(*parts)
@@ -174,7 +174,7 @@ def verify_manifested_payload(
         )
         errors.extend(problems)
         for name in sorted(set(files) - set(entries) - reserved):
-            errors.append("unexpected payload: " + name)
+            errors.append(("unexpected entry: " if inventory_name == "entries" else "unexpected payload: ") + name)
         for name, item in entries.items():
             info = files.get(name)
             if info is None:
