@@ -651,7 +651,7 @@ def verify_research_bundle(bundle_path: str) -> dict[str, Any]:
                                 f"run record has invalid {category}: {logical_name}"
                             )
                             continue
-                        base_name = str(record["path"]).replace("\\\\", "/").rsplit("/", 1)[-1]
+                        base_name = str(record["path"]).replace("\\", "/").rsplit("/", 1)[-1]
                         bundle_name = (
                             f"{category}/{_safe_name(str(logical_name))}/{base_name}"
                         )
