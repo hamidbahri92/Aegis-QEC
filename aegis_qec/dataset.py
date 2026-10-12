@@ -200,6 +200,97 @@ def _hash_uint8_dataset(dataset, *, rows_per_chunk: int = 65536) -> str:
     return digest.hexdigest()
 
 
+
+def _chunk_sha256(
+    syndromes: np.ndarray,
+    observables: np.ndarray,
+    splits: np.ndarray,
+) -> str:
+    """Hash a durable shot chunk including array boundaries and split membership."""
+    digest = hashlib.sha256()
+    for label, values in (
+        ("syndromes", syndromes),
+        ("observables", observables),
+        ("split", splits),
+    ):
+        data = np.asarray(values, dtype=np.uint8)
+        digest.update(
+            f"{label}|{','.join(str(v) for v in data.shape)}|uint8|".encode("ascii")
+        )
+        digest.update(data.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _verify_chunk_journal(handle, *, committed: int, chunk_size: int) -> bool:
+    """Reject changed committed rows before resuming any incomplete dataset."""
+    if "chunk_sha256" not in handle:
+        return False
+    expected_count = (committed + chunk_size - 1) // chunk_size
+    journal = handle["chunk_sha256"]
+    if int(journal.shape[0]) < expected_count:
+        raise ValueError("incomplete dataset commit journal is truncated")
+    for index in range(expected_count):
+        start = index * chunk_size
+        stop = min(committed, start + chunk_size)
+        expected = journal[index]
+        if isinstance(expected, bytes):
+            expected = expected.decode("ascii")
+        actual = _chunk_sha256(
+            handle["syndromes"][start:stop],
+            handle["observables"][start:stop],
+            handle["split"][start:stop],
+        )
+        if actual != expected:
+            raise ValueError(
+                f"incomplete dataset committed chunk integrity mismatch: {index}"
+            )
+    return True
+
+
+def _replay_legacy_chunks(
+    handle, circuit, *,
+    committed: int,
+    chunk_size: int,
+    seed: int,
+    train_fraction: float,
+    validation_fraction: float,
+) -> None:
+    """Qualify old resumable datasets before adding missing durable hashes."""
+    hashes = []
+    for index, start in enumerate(range(0, committed, chunk_size)):
+        count = min(chunk_size, committed - start)
+        sampler = circuit.compile_detector_sampler(
+            seed=(int(seed) + index) & ((1 << 64) - 1)
+        )
+        det, obs = sampler.sample(
+            shots=count, separate_observables=True, bit_packed=False
+        )
+        split = _split_labels(
+            count, seed=seed, chunk_index=index,
+            train_fraction=train_fraction,
+            validation_fraction=validation_fraction,
+        )
+        if (
+            not np.array_equal(det, handle["syndromes"][start:start + count])
+            or not np.array_equal(obs, handle["observables"][start:start + count])
+            or not np.array_equal(split, handle["split"][start:start + count])
+        ):
+            raise ValueError(
+                f"legacy dataset committed chunk replay mismatch: {index}"
+            )
+        hashes.append(_chunk_sha256(det, obs, split))
+    journal = handle.create_dataset(
+        "chunk_sha256",
+        shape=(len(hashes),),
+        maxshape=(None,),
+        chunks=True,
+        dtype="S64",
+    )
+    if hashes:
+        journal[:] = np.asarray(hashes, dtype="S64")
+    handle.flush()
+
+
 def _count_split_labels(
     dataset,
     *,
@@ -373,6 +464,13 @@ def generate_qec_dataset(
                 1.0 - train_fraction - validation_fraction
             )
             handle.attrs["complete"] = False
+            handle.create_dataset(
+                "chunk_sha256",
+                shape=(0,),
+                maxshape=(None,),
+                chunks=True,
+                dtype="S64",
+            )
             handle.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
             handle.attrs["circuit_sha256"] = circuit_sha256
             handle.attrs["raw_dem_sha256"] = raw_dem_sha256
@@ -531,12 +629,29 @@ def generate_qec_dataset(
                 raise RuntimeError(
                     "committed dataset rows are missing; refusing to resume"
                 )
+            if committed % chunk_size:
+                raise RuntimeError(
+                    "incomplete dataset commit boundary is not a full chunk"
+                )
+            journal_present = _verify_chunk_journal(
+                handle, committed=committed, chunk_size=chunk_size
+            )
+            if not journal_present:
+                _replay_legacy_chunks(
+                    handle, circuit, committed=committed,
+                    chunk_size=chunk_size, seed=seed,
+                    train_fraction=train_fraction,
+                    validation_fraction=validation_fraction,
+                )
             if any(length != committed for length in lengths):
                 syndromes.resize((committed, syndromes.shape[1]))
                 observables.resize((committed, observables.shape[1]))
                 split.resize((committed,))
-                handle.attrs["written_shots"] = committed
-                handle.flush()
+            journal = handle["chunk_sha256"]
+            if int(journal.shape[0]) > committed // chunk_size:
+                journal.resize((committed // chunk_size,))
+            handle.attrs["written_shots"] = committed
+            handle.flush()
             written = committed
 
         if int(observables.shape[0]) != written or int(split.shape[0]) != written:
@@ -584,6 +699,14 @@ def generate_qec_dataset(
             syndromes[written:stop] = detector_samples
             observables[written:stop] = observable_samples
             split[written:stop] = split_values
+            chunk_digest = _chunk_sha256(
+                detector_samples, observable_samples, split_values
+            )
+            journal = handle["chunk_sha256"]
+            journal.resize((chunk_index + 1,))
+            journal[chunk_index] = chunk_digest.encode("ascii")
+            # Flush the data and hash before advancing the committed boundary.
+            handle.flush()
             handle.attrs["written_shots"] = stop
             handle.attrs["last_completed_chunk"] = int(chunk_index)
             handle.flush()
