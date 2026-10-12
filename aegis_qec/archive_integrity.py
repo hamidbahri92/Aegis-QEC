@@ -140,7 +140,7 @@ def verify_manifested_payload(
             checksums = source / "checksums.sha256"
             if not checksums.is_file() or checksums.is_symlink():
                 errors.append("missing checksums.sha256")
-            elif not errors and checksums.read_bytes().replace(b"\\r\\n", b"\\n") != _checksum_bytes(entries, manifest_bytes, manifest_name):
+            elif not errors and checksums.read_bytes().replace(b"\r\n", b"\n") != _checksum_bytes(entries, manifest_bytes, manifest_name):
                 errors.append("checksums.sha256 mismatch")
         return errors
 
@@ -196,6 +196,6 @@ def verify_manifested_payload(
             info = files.get("checksums.sha256")
             if info is None:
                 errors.append("missing checksums.sha256")
-            elif not errors and archive.read(info).replace(b"\\r\\n", b"\\n") != _checksum_bytes(entries, manifest_bytes, manifest_name):
+            elif not errors and archive.read(info).replace(b"\r\n", b"\n") != _checksum_bytes(entries, manifest_bytes, manifest_name):
                 errors.append("checksums.sha256 mismatch")
     return errors
