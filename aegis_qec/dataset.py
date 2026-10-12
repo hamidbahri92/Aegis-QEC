@@ -629,7 +629,7 @@ def generate_qec_dataset(
                 raise RuntimeError(
                     "committed dataset rows are missing; refusing to resume"
                 )
-            if committed % chunk_size:
+            if committed % chunk_size and committed != shots:
                 raise RuntimeError(
                     "incomplete dataset commit boundary is not a full chunk"
                 )
@@ -648,8 +648,9 @@ def generate_qec_dataset(
                 observables.resize((committed, observables.shape[1]))
                 split.resize((committed,))
             journal = handle["chunk_sha256"]
-            if int(journal.shape[0]) > committed // chunk_size:
-                journal.resize((committed // chunk_size,))
+            expected_chunks = (committed + chunk_size - 1) // chunk_size
+            if int(journal.shape[0]) > expected_chunks:
+                journal.resize((expected_chunks,))
             handle.attrs["written_shots"] = committed
             handle.flush()
             written = committed
