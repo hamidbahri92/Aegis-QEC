@@ -198,10 +198,17 @@ def fit_surface_code_scaling(
         min(nu_max, best_nu + 2.0 * nu_step),
         31,
     )
-    for critical_probability in refined_pc:
+    # Profile the likelihood at every refined critical probability, not
+    # merely the winner. Otherwise the 95% interval still uses the coarse
+    # grid while the reported point estimate comes from the refined grid.
+    refined_profile_ll = np.full(refined_pc.shape, -np.inf, dtype=float)
+    for index, critical_probability in enumerate(refined_pc):
         for nu in refined_nu:
             x = _scaling_x(p, d, float(critical_probability), float(nu))
             beta, log_likelihood = _fit_logistic_coefficients(x, k, n)
+            refined_profile_ll[index] = max(
+                refined_profile_ll[index], log_likelihood
+            )
             if log_likelihood > best_log_likelihood:
                 best_log_likelihood = log_likelihood
                 best_pc = float(critical_probability)
@@ -209,10 +216,12 @@ def fit_surface_code_scaling(
                 best_beta = beta
 
     cutoff = best_log_likelihood - 0.5 * 3.841458820694124
-    supported_pc = pc_grid[profile_log_likelihood >= cutoff]
+    profiled_pc = np.concatenate((pc_grid, refined_pc))
+    profiled_ll = np.concatenate((profile_log_likelihood, refined_profile_ll))
+    supported_pc = profiled_pc[profiled_ll >= cutoff]
     if len(supported_pc):
-        ci_low = float(np.min(supported_pc))
-        ci_high = float(np.max(supported_pc))
+        ci_low = min(float(np.min(supported_pc)), best_pc)
+        ci_high = max(float(np.max(supported_pc)), best_pc)
     else:
         ci_low = best_pc
         ci_high = best_pc
