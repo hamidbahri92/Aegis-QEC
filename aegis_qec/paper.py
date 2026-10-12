@@ -1299,71 +1299,29 @@ def build_submission_package(
 
 
 
+
 def verify_submission_package(path: str) -> dict[str, Any]:
-    """Verify payload hashes in a submission directory or ZIP file."""
+    """Verify a submission archive or directory without trusting manifest paths.
+
+    Content hashes and the checksums file establish internal consistency only;
+    they are not a digital signature of the submitter.
+    """
+    from .archive_integrity import verify_manifested_payload
 
     source = Path(path).resolve()
-    failures: list[str] = []
-
-    if source.is_dir():
-        manifest_path = source / "MANIFEST.json"
-        if not manifest_path.is_file():
-            raise ValueError("submission directory is missing MANIFEST.json")
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for item in manifest.get("payload", []):
-            payload_path = source / str(item["path"])
-            if not payload_path.is_file():
-                failures.append("missing payload: " + str(item["path"]))
-                continue
-            if payload_path.stat().st_size != int(item["bytes"]):
-                failures.append("size mismatch: " + str(item["path"]))
-            if _sha256_file(payload_path) != str(item["sha256"]):
-                failures.append("hash mismatch: " + str(item["path"]))
-        expected_names = {
-            str(item["path"])
-            for item in manifest.get("payload", [])
-        } | {"MANIFEST.json", "checksums.sha256"}
-        actual_names = {
-            path.relative_to(source).as_posix()
-            for path in source.rglob("*")
-            if path.is_file()
-        }
-        for extra in sorted(actual_names - expected_names):
-            failures.append("unexpected payload: " + extra)
-        source_hash = None
-    elif source.is_file() and source.suffix.lower() == ".zip":
-        source_hash = _sha256_file(source)
-        with zipfile.ZipFile(source, "r") as archive:
-            names = set(archive.namelist())
-            if "MANIFEST.json" not in names:
-                raise ValueError("submission ZIP is missing MANIFEST.json")
-            manifest = json.loads(
-                archive.read("MANIFEST.json").decode("utf-8")
-            )
-            expected_names = {
-                str(item["path"])
-                for item in manifest.get("payload", [])
-            } | {"MANIFEST.json", "checksums.sha256"}
-            for extra in sorted(names - expected_names):
-                failures.append("unexpected payload: " + extra)
-            for item in manifest.get("payload", []):
-                name = str(item["path"])
-                if name not in names:
-                    failures.append("missing payload: " + name)
-                    continue
-                data = archive.read(name)
-                if len(data) != int(item["bytes"]):
-                    failures.append("size mismatch: " + name)
-                if hashlib.sha256(data).hexdigest() != str(item["sha256"]):
-                    failures.append("hash mismatch: " + name)
-    else:
-        raise ValueError("submission path must be a directory or .zip file")
-
+    failures = verify_manifested_payload(
+        source,
+        manifest_name="MANIFEST.json",
+        manifest_type="aegis_qec_submission_package",
+        inventory_name="payload",
+        required_names=("research-project.json", "audit.json"),
+        has_checksums=True,
+    )
     return {
         "schema_version": 1,
         "verification_type": "aegis_qec_submission_package",
         "path": str(source),
         "valid": not failures,
         "failures": failures,
-        "zip_sha256": source_hash,
+        "zip_sha256": _sha256_file(source) if source.is_file() else None,
     }
