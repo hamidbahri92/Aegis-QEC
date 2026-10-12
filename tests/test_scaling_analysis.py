@@ -68,3 +68,25 @@ def test_scaling_rejects_unknown_decoder():
             _synthetic_campaign(),
             decoder="missing-decoder",
         )
+
+
+
+def test_profile_interval_contains_refined_maximum_likelihood_fit():
+    result = fit_surface_code_scaling(
+        _synthetic_campaign(),
+        decoder="test-decoder",
+        pc_grid_points=21,
+        nu_grid_points=11,
+    )
+    lo, hi = result["critical_probability_ci95_profile"]
+    assert lo <= result["critical_probability"] <= hi
+    assert lo <= 0.01 <= hi
+    assert result["nu"] > 0
+
+
+def test_scaling_refuses_all_successes_without_inventing_threshold():
+    campaign = _synthetic_campaign()
+    for row in campaign["rows"]:
+        row["errors"] = 0
+    with pytest.raises(ValueError, match="both logical successes and failures"):
+        fit_surface_code_scaling(campaign, decoder="test-decoder")
