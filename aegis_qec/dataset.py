@@ -806,6 +806,27 @@ def inspect_qec_dataset(
         if int(split.shape[0]) != int(syndromes.shape[0]):
             failures.append("split row count does not match syndromes")
 
+        if verify:
+            committed = int(handle.attrs.get("written_shots", 0))
+            if committed != int(syndromes.shape[0]):
+                failures.append(
+                    "dataset contains uncommitted rows; resume before verifying"
+                )
+            elif "chunk_sha256" in handle:
+                try:
+                    _verify_chunk_journal(
+                        handle,
+                        committed=committed,
+                        chunk_size=int(handle.attrs["chunk_size"]),
+                    )
+                except ValueError as exc:
+                    failures.append(str(exc))
+            elif not complete and committed:
+                failures.append(
+                    "legacy incomplete dataset has no chunk journal; "
+                    "resume with original parameters for deterministic replay"
+                )
+
         if verify and complete:
             expected = {
                 "syndromes_sha256": _hash_bool_dataset(syndromes),
