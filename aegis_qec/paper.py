@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
 import zipfile
 from datetime import datetime, timezone
 from importlib import metadata
@@ -1050,15 +1051,44 @@ def _payload(root: Path) -> list[dict[str, Any]]:
 
 
 def _zip_directory(source: Path, target: Path) -> None:
-    with zipfile.ZipFile(target, "w") as archive:
-        for path in sorted(source.rglob("*")):
-            if not path.is_file():
-                continue
-            info = zipfile.ZipInfo(path.relative_to(source).as_posix())
-            info.date_time = (1980, 1, 1, 0, 0, 0)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
-            archive.writestr(info, path.read_bytes())
+    """Create a deterministic ZIP without loading research datasets into RAM.
+
+    Build in the destination directory and publish atomically after successful
+    compression; an interrupted packaging job cannot replace a valid archive
+    with a truncated one.
+    """
+    source = source.resolve()
+    target = target.resolve()
+    if target.is_relative_to(source):
+        raise ValueError("output archive cannot be nested inside its input directory")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=target.parent,
+            prefix=".aegis-archive-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+        with zipfile.ZipFile(temp_path, "w") as archive:
+            for path in sorted(source.rglob("*")):
+                if not path.is_file():
+                    continue
+                if path.is_symlink():
+                    raise ValueError(f"refusing symlink artifact: {path}")
+                info = zipfile.ZipInfo(path.relative_to(source).as_posix())
+                info.date_time = (1980, 1, 1, 0, 0, 0)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o644 << 16
+                with path.open("rb") as reader, archive.open(
+                    info, "w", force_zip64=True
+                ) as writer:
+                    shutil.copyfileobj(reader, writer, length=1024 * 1024)
+        os.replace(temp_path, target)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def build_submission_package(
