@@ -587,43 +587,20 @@ def create_research_bundle(
     }
 
 
+
 def verify_research_bundle(bundle_path: str) -> dict[str, Any]:
-    """Verify the content manifest and hashes of an Aegis research bundle."""
+    """Verify the complete research bundle without ambiguous ZIP membership."""
+    from .archive_integrity import verify_manifested_payload
 
     bundle = Path(bundle_path).resolve()
-    failures: list[str] = []
-
-    with zipfile.ZipFile(bundle, "r") as archive:
-        names = set(archive.namelist())
-        if "BUNDLE_MANIFEST.json" not in names:
-            raise ValueError("bundle is missing BUNDLE_MANIFEST.json")
-
-        manifest = json.loads(
-            archive.read("BUNDLE_MANIFEST.json").decode("utf-8")
-        )
-        if manifest.get("bundle_type") != "aegis_qec_research_bundle":
-            raise ValueError("not an Aegis QEC research bundle")
-
-        expected_names = {"BUNDLE_MANIFEST.json"}
-        for entry in manifest.get("entries", []):
-            name = str(entry["path"])
-            expected_names.add(name)
-            if name.startswith("/") or ".." in Path(name).parts:
-                failures.append(f"unsafe archive path: {name}")
-                continue
-            if name not in names:
-                failures.append(f"missing entry: {name}")
-                continue
-            data = archive.read(name)
-            if len(data) != int(entry["bytes"]):
-                failures.append(f"size mismatch: {name}")
-            if _sha256_bytes(data) != str(entry["sha256"]):
-                failures.append(f"hash mismatch: {name}")
-
-        extras = sorted(names - expected_names)
-        for name in extras:
-            failures.append(f"unexpected entry: {name}")
-
+    failures = verify_manifested_payload(
+        bundle,
+        manifest_name="BUNDLE_MANIFEST.json",
+        manifest_type="aegis_qec_research_bundle",
+        inventory_name="entries",
+        required_names=("experiment.json", "aegis-run.json"),
+        has_checksums=False,
+    )
     return {
         "schema_version": 1,
         "bundle_type": "aegis_qec_research_bundle_verification",
