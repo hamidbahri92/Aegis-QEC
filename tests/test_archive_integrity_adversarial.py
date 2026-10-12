@@ -49,7 +49,15 @@ def _submission(tmp_path: Path) -> tuple[Path, Path]:
 
 def _research_zip(tmp_path: Path) -> Path:
     zipped = tmp_path / "research.zip"
-    items = {"experiment.json": b"{}", "aegis-run.json": b"{}"}
+    run_record = {
+        "manifest": {"sha256": _sha(b"{}")},
+        "inputs": {},
+        "artifacts": {},
+    }
+    items = {
+        "experiment.json": b"{}",
+        "aegis-run.json": json.dumps(run_record, sort_keys=True).encode("utf-8"),
+    }
     manifest = {
         "schema_version": 1,
         "bundle_type": "aegis_qec_research_bundle",
