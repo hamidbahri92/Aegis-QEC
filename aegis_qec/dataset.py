@@ -497,6 +497,48 @@ def generate_qec_dataset(
         observables = handle["observables"]
         split = handle["split"]
         written = int(syndromes.shape[0])
+
+        if not is_new and bool(handle.attrs.get("complete", False)):
+            # Never re-sign already-complete data by overwriting the stored
+            # digests. A corrupted HDF5 file must stay corrupt on re-entry.
+            if (
+                written != shots
+                or int(observables.shape[0]) != written
+                or int(split.shape[0]) != written
+                or int(handle.attrs.get("written_shots", -1)) != written
+            ):
+                raise ValueError("completed dataset row counts changed")
+            for name, dataset, hasher in (
+                ("syndromes_sha256", syndromes, _hash_bool_dataset),
+                ("observables_sha256", observables, _hash_bool_dataset),
+                ("split_sha256", split, _hash_uint8_dataset),
+            ):
+                if str(handle.attrs.get(name, "")) != hasher(dataset):
+                    raise ValueError(
+                        f"completed dataset integrity mismatch: {name}"
+                    )
+
+        if not is_new and not bool(handle.attrs.get("complete", False)):
+            # The written_shots attribute is the durable commit boundary:
+            # discard any partially appended rows after an interrupted chunk.
+            committed = int(handle.attrs.get("written_shots", 0))
+            lengths = (
+                written, int(observables.shape[0]), int(split.shape[0])
+            )
+            if committed < 0 or committed > shots:
+                raise RuntimeError("invalid incomplete dataset commit boundary")
+            if any(length < committed for length in lengths):
+                raise RuntimeError(
+                    "committed dataset rows are missing; refusing to resume"
+                )
+            if any(length != committed for length in lengths):
+                syndromes.resize((committed, syndromes.shape[1]))
+                observables.resize((committed, observables.shape[1]))
+                split.resize((committed,))
+                handle.attrs["written_shots"] = committed
+                handle.flush()
+            written = committed
+
         if int(observables.shape[0]) != written or int(split.shape[0]) != written:
             raise RuntimeError("dataset row counts disagree; refusing to resume")
         if written > shots:
