@@ -104,10 +104,24 @@ class IBMQuantumInterface(QuantumHardwareInterface):
             t2 = np.array([props.t2(q) for q in range(n)], dtype=np.float64)
             gate_errors = []
             for gate in props.gates:
+                if gate.gate not in ("cx", "cz"):
+                    continue
                 try:
-                    if gate.gate in ("cx", "cz"):
-                        gate_errors.append(float(gate.parameters[0].value))
-                except Exception:
+                    # IBM's documented accessor is order-independent. The
+                    # first gate parameter might instead be gate_length.
+                    accessor = getattr(props, "gate_error", None)
+                    if callable(accessor) and hasattr(gate, "qubits"):
+                        value = float(accessor(gate.gate, gate.qubits))
+                    else:
+                        error_property = next(
+                            item for item in gate.parameters
+                            if getattr(item, "name", None) == "gate_error"
+                        )
+                        value = float(error_property.value)
+                    if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+                        raise ValueError("invalid backend gate error probability")
+                    gate_errors.append(value)
+                except (AttributeError, StopIteration, TypeError, ValueError):
                     continue
             if not gate_errors:
                 raise ValueError(
