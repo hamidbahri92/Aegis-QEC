@@ -625,6 +625,42 @@ def verify_research_bundle(bundle_path: str) -> dict[str, Any]:
         required_names=("experiment.json", "aegis-run.json"),
         has_checksums=False,
     )
+    if not failures:
+        # Membership and hashes alone cannot prove that a bundle contains
+        # *all* evidence cited by its embedded scientific run record.
+        try:
+            with zipfile.ZipFile(bundle, "r") as archive:
+                manifest = json.loads(archive.read("BUNDLE_MANIFEST.json"))
+                run_record = json.loads(archive.read("aegis-run.json"))
+                inventory = {
+                    item["path"]: item["sha256"]
+                    for item in manifest["entries"]
+                }
+                if run_record.get("manifest", {}).get("sha256") != _sha256_bytes(
+                    archive.read("experiment.json")
+                ):
+                    failures.append("run record experiment manifest mismatch")
+                for category in ("inputs", "artifacts"):
+                    records = run_record.get(category, {})
+                    if not isinstance(records, dict):
+                        failures.append(f"run record has invalid {category} inventory")
+                        continue
+                    for logical_name, record in records.items():
+                        if not isinstance(record, dict) or not record.get("path"):
+                            failures.append(
+                                f"run record has invalid {category}: {logical_name}"
+                            )
+                            continue
+                        base_name = str(record["path"]).replace("\\\\", "/").rsplit("/", 1)[-1]
+                        bundle_name = (
+                            f"{category}/{_safe_name(str(logical_name))}/{base_name}"
+                        )
+                        if inventory.get(bundle_name) != record.get("sha256"):
+                            failures.append(
+                                f"missing or inconsistent referenced evidence: {bundle_name}"
+                            )
+        except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+            failures.append(f"invalid research run record: {exc}")
     return {
         "schema_version": 1,
         "bundle_type": "aegis_qec_research_bundle_verification",
