@@ -12,6 +12,10 @@ def generate_pauli_errors(
     layout: RotatedSurfaceLayout, rounds: int, p_phys: float, rng: np.random.Generator
 ) -> Dict[Tuple[Tuple[int, int], int], str]:
     """IID per-qubit-per-round Pauli errors with bias Z>X>Y."""
+    if not np.isfinite(p_phys) or not 0.0 <= p_phys <= 1.0:
+        raise ValueError("p_phys must be a finite probability in [0, 1]")
+    if rounds < 1:
+        raise ValueError("rounds must be positive")
     errors: Dict[Tuple[Tuple[int, int], int], str] = {}
     data_qubits = layout.data_qubits()
     for t in range(rounds):
@@ -104,11 +108,16 @@ def generate_correlated_pauli_errors(
     errors: Dict[Tuple[Tuple[int, int], int], str] = {}
     data_qubits = layout.data_qubits()
     n_qubits = len(data_qubits)
-    if n_qubits == 0:
-        return errors
-
     base_rate = float(noise_params.get("base_error_rate", 1e-3))
     corr_len = float(noise_params.get("correlation_length", 2.0))
+    if not np.isfinite(base_rate) or not 0.0 <= base_rate <= 1.0:
+        raise ValueError("base_error_rate must be a finite probability")
+    if not np.isfinite(corr_len) or corr_len <= 0:
+        raise ValueError("correlation_length must be positive and finite")
+    if rounds < 1:
+        raise ValueError("rounds must be positive")
+    if n_qubits == 0 or base_rate == 0:
+        return errors
     use_dense = n_qubits <= 256
 
     if use_dense:
@@ -126,13 +135,18 @@ def generate_correlated_pauli_errors(
         prev = np.zeros(n_qubits, dtype=np.float64)
         for t in range(rounds):
             vec = rng.multivariate_normal(
-                mean=np.zeros(n_qubits), cov=kernel * base_rate
+                mean=np.zeros(n_qubits), cov=kernel
             )
             if t > 0:
                 vec += 0.25 * prev * rng.normal(0, 0.1, size=n_qubits)
             prev = vec
+            intensity = np.abs(vec)
+            mean_intensity = max(float(np.mean(intensity)), 1e-12)
+            event_probability = np.clip(
+                base_rate * intensity / mean_intensity, 0.0, 1.0
+            )
             for i, dq in enumerate(data_qubits):
-                if abs(vec[i]) > rng.uniform(0, 1):
+                if rng.random() < event_probability[i]:
                     r = rng.random()
                     pauli = "Z" if r < 0.6 else ("X" if r < 0.9 else "Y")
                     errors[(dq, t)] = pauli
@@ -151,7 +165,7 @@ def generate_correlated_pauli_errors(
     K = gauss_kernel(sigma=max(0.5, corr_len / 3.0), size=5)
 
     for t in range(rounds):
-        white = rng.normal(0.0, np.sqrt(base_rate), size=(d, d))
+        white = rng.normal(0.0, 1.0, size=(d, d))
         pad = 2
         padded = np.pad(white, ((pad, pad), (pad, pad)), mode="reflect")
         smooth = np.zeros_like(white)
@@ -160,9 +174,14 @@ def generate_correlated_pauli_errors(
                 block = padded[i : i + 5, j : j + 5]
                 smooth[i, j] = float((block * K).sum())
 
-        sigma = float(np.std(smooth)) + 1e-12
-        norm = np.abs(smooth) / (3.0 * sigma)
-        p_local = np.clip(norm, 0.0, 1.0)
+        # Normalize the spatially correlated intensity before applying the
+        # requested base rate. Previously amplitude and variance cancelled,
+        # making large-grid event probabilities independent of base_error_rate.
+        intensity = np.abs(smooth)
+        mean_intensity = max(float(np.mean(intensity)), 1e-12)
+        p_local = np.clip(
+            base_rate * intensity / mean_intensity, 0.0, 1.0
+        )
 
         for dq in data_qubits:
             i, j = dq
