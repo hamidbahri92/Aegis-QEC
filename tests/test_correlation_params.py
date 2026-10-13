@@ -16,3 +16,15 @@ def test_corr_params_integration(tmp_path):
     sZ = [0]*len(rt.builder.node_order("Z"))
     resX, resZ = rt.decode_from_syndromes_uniform(sX, sZ)
     assert resX.avg_cost >= 0 and resZ.avg_cost >= 0
+
+
+def test_invalid_explicit_correlation_file_fails_instead_of_using_defaults(tmp_path):
+    import pytest
+
+    cfg = AegisConfig(distance=3, rounds=3, decoder_type="mwpm_corr")
+    cfg.correlation_params = str(tmp_path / "missing-correlation.json")
+    rt = DecoderRuntime(cfg, RotatedSurfaceLayout(3))
+    sx = [0] * len(rt.builder.node_order("X"))
+    sz = [0] * len(rt.builder.node_order("Z"))
+    with pytest.raises(FileNotFoundError):
+        rt.decode_from_syndromes_uniform(sx, sz)
