@@ -70,7 +70,9 @@ def export_parquet(path: str, rows: List[Dict[str, Any]]) -> None:
         ) as handle:
             temp = Path(handle.name)
         pq.write_table(table, str(temp))
-        with temp.open("rb") as handle:
+        # Windows fsync requires a writable file descriptor.
+        with temp.open("r+b") as handle:
+            handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, destination)
     finally:
