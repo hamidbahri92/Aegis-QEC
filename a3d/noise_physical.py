@@ -39,6 +39,10 @@ def syndromes_from_pauli_errors(
       raw_t(stab) = parity(stab on error@t) XOR mflip_t
       s_t = raw_t XOR raw_{t-1}
     """
+    if not np.isfinite(p_meas) or not 0.0 <= p_meas <= 1.0:
+        raise ValueError("p_meas must be a finite probability in [0, 1]")
+    if rounds < 1:
+        raise ValueError("rounds must be positive")
     if rng is None:
         rng = np.random.default_rng(0)
 
