@@ -5,6 +5,7 @@ import pytest
 
 from a3d.decoder_unionfind import UnionFindErasuresDecoder
 from a3d.graph import DecodingGraph, Edge
+from a3d.stats import effective_cost_from_edge
 
 
 def _graph(boundary=False, erasure=False):
@@ -35,7 +36,10 @@ def test_unionfind_erasure_peeling_preserves_full_correction_cost():
     graph = _graph(erasure=True)
     result = UnionFindErasuresDecoder().decode(graph, [1, 1])
     assert result.corrections == graph.edges
-    assert result.log_likelihood == pytest.approx(2.0)
+    # Erasure-aware log odds are different from the raw edge weight.
+    assert result.log_likelihood == pytest.approx(
+        effective_cost_from_edge(graph.edges[0])
+    )
 
 
 def test_unionfind_single_defect_to_boundary_is_proven():
