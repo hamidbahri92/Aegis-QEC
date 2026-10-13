@@ -136,7 +136,14 @@ class MWPMDecoder:
                 f"{len(compiled.detector_nodes)} detector bits or "
                 f"{len(graph.nodes)} graph-node bits, got {len(syndromes)}"
             )
-        return np.asarray([int(v) & 1 for v in values], dtype=np.uint8)
+        # Binary detector evidence must not be silently masked modulo two.
+        # That would turn corrupt data into an apparently valid experiment.
+        raw = np.asarray(values)
+        if np.any((raw != 0) & (raw != 1)):
+            raise ValueError(
+                "MWPM syndrome must contain only binary detector bits"
+            )
+        return np.asarray(raw, dtype=np.uint8)
 
     @staticmethod
     def _result_from_fault_vector(

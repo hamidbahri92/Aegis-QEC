@@ -155,3 +155,31 @@ def test_batch_accepts_numpy_detector_matrix_without_truth_ambiguity():
     assert MWPMDecoder().decode_batch(
         graph, np.empty((0, 2), dtype=np.uint8)
     ) == []
+
+
+
+def test_mwpm_rejects_nonbinary_syndromes_at_direct_api_boundary():
+    import numpy as np
+    import pytest
+
+    graph = DecodingGraph(
+        nodes=[10, 20],
+        edges=[Edge(10, 20, 1.0, "space")],
+        node_meta={
+            10: ("X", None, 0, "stab"),
+            20: ("X", None, 0, "stab"),
+        },
+    )
+    decoder = MWPMDecoder()
+    for syndrome in ([2, 0], [float("nan"), 1], [0, -1], [1.2, 0]):
+        with pytest.raises(ValueError, match="binary detector bits"):
+            decoder.decode(graph, syndrome)
+
+    bits = np.asarray([[1, 1], [0, 0]], dtype=np.uint8)
+    original = bits.copy()
+    result = decoder.decode_batch(graph, bits)
+    assert len(result) == 2
+    np.testing.assert_array_equal(bits, original)
+    assert result[0].corrections == graph.edges
+    with pytest.raises(ValueError, match="binary detector bits"):
+        decoder.decode_batch(graph, np.asarray([[1, 2]], dtype=np.uint8))
