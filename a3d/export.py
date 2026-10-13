@@ -7,32 +7,77 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 
+def _export_columns(rows: List[Dict[str, Any]]) -> list[str]:
+    """Preserve the union of every evidence record's fields."""
+    if not all(isinstance(row, dict) for row in rows):
+        raise TypeError("all exported records must be dictionaries")
+    if not all(isinstance(key, str) for row in rows for key in row):
+        raise TypeError("scientific record column names must be strings")
+    return sorted({key for row in rows for key in row})
+
+
 def export_csv(path: str, rows: List[Dict[str, Any]]) -> None:
-    if not rows:
-        with open(path, "w", newline="") as f:
-            f.write("")
-        return
-    headers = sorted(rows[0].keys())
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=headers)
-        w.writeheader()
-        for r in rows:
-            w.writerow(r)
+    """Atomically export *all* columns, including those absent from row one."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    columns = _export_columns(rows)
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="",
+            prefix=".aegis-csv-", suffix=".tmp",
+            dir=destination.parent, delete=False,
+        ) as handle:
+            temp = Path(handle.name)
+            if rows:
+                writer = csv.DictWriter(handle, fieldnames=columns)
+                writer.writeheader()
+                writer.writerows(rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, destination)
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
 
 
 def export_parquet(path: str, rows: List[Dict[str, Any]]) -> None:
+    import os
+    import tempfile
+    from pathlib import Path
+
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
-    except Exception as e:
-        raise RuntimeError("pyarrow not available") from e
-    if not rows:
-        table = pa.Table.from_pydict({})
-    else:
-        keys = sorted(rows[0].keys())
-        cols = {k: [r.get(k, None) for r in rows] for k in keys}
-        table = pa.Table.from_pydict(cols)
-    pq.write_table(table, path)
+    except ImportError as exc:
+        raise RuntimeError("pyarrow not available") from exc
+
+    columns = _export_columns(rows)
+    table = pa.Table.from_pydict({
+        key: [row.get(key) for row in rows] for key in columns
+    })
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=".aegis-parquet-", suffix=".tmp",
+            dir=destination.parent, delete=False,
+        ) as handle:
+            temp = Path(handle.name)
+        pq.write_table(table, str(temp))
+        # Windows fsync requires a writable file descriptor.
+        with temp.open("r+b") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, destination)
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
 
 
 def export_fixed_point_header(
