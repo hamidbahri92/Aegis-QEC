@@ -66,3 +66,47 @@ def test_iid_pauli_and_measurement_noise_probabilities_are_validated():
     assert len(generate_pauli_errors(
         layout, 3, 1.0, np.random.default_rng(1)
     )) == 27
+
+
+
+def test_correlated_covariance_rejects_ambiguous_hardware_qubit_mapping():
+    layout = RotatedSurfaceLayout(3)
+    with pytest.raises(ValueError, match="must match"):
+        generate_correlated_pauli_errors(
+            layout, 1,
+            {"base_error_rate": 0.2, "crosstalk_matrix": np.eye(64)},
+            np.random.default_rng(11),
+        )
+
+
+@pytest.mark.parametrize("mode", ("asymmetric", "nan", "not_psd"))
+def test_correlated_covariance_refuses_unphysical_matrices(mode):
+    layout = RotatedSurfaceLayout(3)
+    matrix = np.zeros((9, 9), dtype=float)
+    if mode == "asymmetric":
+        matrix[0, 1] = 0.3
+    elif mode == "nan":
+        matrix[0, 0] = float("nan")
+    else:
+        matrix = -100 * np.eye(9)
+    with pytest.raises(ValueError, match="crosstalk_matrix|covariance"):
+        generate_correlated_pauli_errors(
+            layout, 1,
+            {"base_error_rate": 0.2, "crosstalk_matrix": matrix},
+            np.random.default_rng(11),
+        )
+
+
+def test_valid_explicit_correlated_covariance_is_seed_reproducible():
+    layout = RotatedSurfaceLayout(3)
+    params = {
+        "base_error_rate": 0.2,
+        "crosstalk_matrix": np.zeros((9, 9)),
+    }
+    a = generate_correlated_pauli_errors(
+        layout, 3, params, np.random.default_rng(11)
+    )
+    b = generate_correlated_pauli_errors(
+        layout, 3, params, np.random.default_rng(11)
+    )
+    assert a == b
