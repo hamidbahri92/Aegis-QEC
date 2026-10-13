@@ -73,7 +73,14 @@ class OSDDecoder:
                 adjusted[e.v] = 1 - adjusted.get(e.v, 0)
             new_syn = [adjusted.get(node, 0) for node in graph.nodes]
 
-            sub = self.primary_decoder.decode(graph, new_syn)
+            try:
+                sub = self.primary_decoder.decode(graph, new_syn)
+            except ValueError as exc:
+                if "failed to resolve every detector event" not in str(exc):
+                    raise
+                # An OSD trial that cannot satisfy the modified syndrome
+                # is not a valid correction candidate.
+                continue
             total_cost = eff_cost(e) + sub.log_likelihood
             total_corr = [e] + sub.corrections
             avg_cost = total_cost / max(1, len(total_corr))
