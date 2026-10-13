@@ -28,12 +28,15 @@ def setup_json_logging(level: int = logging.INFO) -> None:
 
 
 def log_decode_events(path: str, axis: str, decoder: str, edges_count: int) -> None:
-    try:
-        import csv
-        import os
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow([axis, decoder, edges_count])
-    except Exception:
-        pass
+    """Durably record explicitly requested events; propagate write failures."""
+    import csv
+    import os
+
+    os.makedirs(
+        os.path.dirname(os.path.abspath(path)), exist_ok=True
+    )
+    with open(path, "a", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([axis, decoder, edges_count])
+        handle.flush()
+        os.fsync(handle.fileno())
