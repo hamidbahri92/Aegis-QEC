@@ -53,7 +53,7 @@ def export_fixed_point_header(
     import tempfile
     from pathlib import Path
 
-    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\\Z")
+    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
     prepared: list[tuple[str, float, np.ndarray]] = []
     if not arrays:
         raise ValueError("cannot export an empty fixed-point artifact")
@@ -79,7 +79,7 @@ def export_fixed_point_header(
     for key, value in (meta or {}).items():
         tag, text = str(key), str(value)
         if any(token in part for part in (tag, text)
-               for token in ("*/", "\\n", "\\r")):
+               for token in ("*/", "\n", "\r")):
             raise ValueError("metadata contains unsafe C comment content")
         comments.append((tag, text))
 
@@ -88,24 +88,24 @@ def export_fixed_point_header(
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", newline="\\n",
+            mode="w", encoding="utf-8", newline="\n",
             prefix=".aegis-export-", suffix=".tmp",
             dir=target.parent, delete=False,
         ) as output:
             temporary = Path(output.name)
-            output.write("/* Aegis validated fixed-point export */\\n")
-            output.write("#pragma once\\n#include <stdint.h>\\n\\n")
+            output.write("/* Aegis validated fixed-point export */\n")
+            output.write("#pragma once\n#include <stdint.h>\n\n")
             for key, value in comments:
-                output.write(f"/* {key}: {value} */\\n")
+                output.write(f"/* {key}: {value} */\n")
             for name, scale, values in prepared:
                 macro = name.upper()
-                output.write(f"#define {macro}_SCALE {scale:.12g}\\n")
+                output.write(f"#define {macro}_SCALE {scale:.12g}\n")
                 for axis, length in enumerate(values.shape):
-                    output.write(f"#define {macro}_DIM{axis} {int(length)}\\n")
-                output.write(f"static const int16_t {name}[] = {{\\n")
+                    output.write(f"#define {macro}_DIM{axis} {int(length)}\n")
+                output.write(f"static const int16_t {name}[] = {{\n")
                 for value in values.flat:
-                    output.write(f"  {int(value)},\\n")
-                output.write("};\\n\\n")
+                    output.write(f"  {int(value)},\n")
+                output.write("};\n\n")
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, target)
