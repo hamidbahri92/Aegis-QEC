@@ -49,6 +49,10 @@ class DecoderRuntime:
             raise ValueError(f"Expected {nX} X-syndromes, got {len(syndromes_X)}")
         if len(syndromes_Z) != nZ:
             raise ValueError(f"Expected {nZ} Z-syndromes, got {len(syndromes_Z)}")
+        if any(value not in (0, 1) for value in syndromes_X):
+            raise ValueError("X syndrome must contain only binary detector bits")
+        if any(value not in (0, 1) for value in syndromes_Z):
+            raise ValueError("Z syndrome must contain only binary detector bits")
 
     def _weight_dicts_from_cfg(self, sector: str) -> Tuple[
         Dict[Tuple[Tuple[int, int], int], float],
