@@ -38,10 +38,12 @@ class OSDDecoder:
         if self.osd_order == 0:
             return base
 
-        syn = syndromes
-        if len(syn) < len(graph.nodes):
-            syn = syn + [0] * (len(graph.nodes) - len(syn))
-        defects: Set[int] = {i for i, s in enumerate(syn) if (s % 2) == 1}
+        node_bits = self.primary_decoder._syndrome_by_node(
+            graph, syndromes
+        )
+        defects: Set[int] = {
+            node for node, bit in node_bits.items() if bit == 1
+        }
 
         used = {_edge_key(e) for e in base.corrections}
 
@@ -64,11 +66,12 @@ class OSDDecoder:
 
         for i in range(min(self.osd_order, len(cands))):
             e = cands[i]
-            new_syn = list(syn)
+            adjusted = dict(node_bits)
             if not is_boundary(e.u):
-                new_syn[e.u] ^= 1
+                adjusted[e.u] = 1 - adjusted.get(e.u, 0)
             if not is_boundary(e.v):
-                new_syn[e.v] ^= 1
+                adjusted[e.v] = 1 - adjusted.get(e.v, 0)
+            new_syn = [adjusted.get(node, 0) for node in graph.nodes]
 
             sub = self.primary_decoder.decode(graph, new_syn)
             total_cost = eff_cost(e) + sub.log_likelihood
