@@ -5,7 +5,7 @@ from collections import defaultdict, deque
 from typing import List, Set
 
 from .accel import maybe_jit
-from .decoder_greedy import DecodeResult
+from .decoder_greedy import DecodeResult, GreedyMatchingDecoder
 from .graph import DecodingGraph, Edge
 from .stats import effective_cost_from_edge
 
@@ -98,54 +98,92 @@ class UnionFindErasuresDecoder:
         return chosen
 
     def decode(self, graph: DecodingGraph, syndromes: List[int]) -> DecodeResult:
-        n = len(graph.nodes)
-        syn = syndromes + [0]*(n-len(syndromes)) if len(syndromes)<n else syndromes[:]
-        defects: Set[int] = {i for i,s in enumerate(syn) if (s%2)==1}
+        """Decode graph-node detector events, rejecting incomplete corrections.
 
-        # Peel erasures first
-        chosen: List[Edge] = self._peel_erasures(graph, defects, perase_threshold=0.5)
-        total_cost = 0.0
+        This legacy union-find-style heuristic is not a substitute for a
+        production sparse-blossom decoder. Only parity-consistent corrections
+        may be returned as successful decoding results.
+        """
+        node_to_position = {
+            node: index for index, node in enumerate(graph.nodes)
+        }
+        if len(node_to_position) != len(graph.nodes):
+            raise ValueError("decoding graph contains duplicate node IDs")
+        readings = GreedyMatchingDecoder._syndrome_by_node(
+            graph, syndromes
+        )
+        original_defects = {
+            node for node, bit in readings.items() if bit
+        }
+        defects = set(original_defects)
+
+        # Erasure pre-peeling may consume some defects before DSU growth.
+        chosen = self._peel_erasures(
+            graph, defects, perase_threshold=0.5
+        )
         matched_to_boundary: List[int] = []
+        dsu = _DSU(len(graph.nodes))
+        for node, position in node_to_position.items():
+            dsu.parity[position] = int(node in defects)
+            dsu.has_boundary[position] = self._is_boundary(graph, node)
 
-        # Prepare DSU
-        dsu = _DSU(n)
-        for i in range(n):
-            if i in defects: dsu.parity[i]=1
-            if self._is_boundary(graph, i): dsu.has_boundary[i]=True
+        edges = sorted(graph.edges, key=effective_cost_from_edge)
+        odd_components = sum(dsu.parity)
 
-        edges = list(graph.edges)
-        edges.sort(key=effective_cost_from_edge)
-
-        odd_components = sum(dsu.parity)  # number of odd nodes
-
-        for e in edges:
-            u, v = e.u, e.v
+        for edge in edges:
+            if edge.u not in node_to_position or edge.v not in node_to_position:
+                raise ValueError("decoding edge references an unknown node ID")
+            u = node_to_position[edge.u]
+            v = node_to_position[edge.v]
             ru, rv = dsu.find(u), dsu.find(v)
             if ru == rv:
                 continue
-            # useful if connects two odd components or attaches odd comp to a boundary
-            before = (dsu.parity[ru] + dsu.parity[rv])
-            will_have_boundary = dsu.has_boundary[ru] or dsu.has_boundary[rv]
-            useful = bool(_useful_pair(int(dsu.parity[ru]), int(dsu.parity[rv]), int(dsu.has_boundary[ru]), int(dsu.has_boundary[rv])))
+            before = dsu.parity[ru] + dsu.parity[rv]
+            will_have_boundary = (
+                dsu.has_boundary[ru] or dsu.has_boundary[rv]
+            )
+            useful = bool(
+                _useful_pair(
+                    int(dsu.parity[ru]), int(dsu.parity[rv]),
+                    int(dsu.has_boundary[ru]), int(dsu.has_boundary[rv]),
+                )
+            )
             if not useful:
                 continue
-            dsu.unite(ru, rv)
-            chosen.append(e)
-            c = effective_cost_from_edge(e)
-            total_cost += c
-            if self._is_boundary(graph, u) and (v in defects):
-                matched_to_boundary.append(v)
-            elif self._is_boundary(graph, v) and (u in defects):
-                matched_to_boundary.append(u)
 
-            # update odd component count conservatively
-            if before==2:
+            dsu.unite(ru, rv)
+            chosen.append(edge)
+            if self._is_boundary(graph, edge.u) and edge.v in defects:
+                matched_to_boundary.append(edge.v)
+            elif self._is_boundary(graph, edge.v) and edge.u in defects:
+                matched_to_boundary.append(edge.u)
+            if before == 2:
                 odd_components -= 2
-            elif will_have_boundary and before==1:
+            elif will_have_boundary and before == 1:
                 odd_components -= 1
             if odd_components <= 0:
                 break
 
-        pair_count = max(1, len(chosen))
-        avg_cost = total_cost / pair_count
-        return DecodeResult(chosen, total_cost, matched_to_boundary, avg_cost)
+        # DSU cluster parity is not sufficient to certify the final edge
+        # correction. Verify the actual edge-boundary vector explicitly.
+        residual = set(original_defects)
+        for edge in chosen:
+            for node in (edge.u, edge.v):
+                if self._is_boundary(graph, node):
+                    continue
+                if node in residual:
+                    residual.remove(node)
+                else:
+                    residual.add(node)
+        if residual:
+            raise ValueError(
+                "union-find heuristic did not satisfy the observed syndrome"
+            )
+
+        total_cost = float(
+            sum(effective_cost_from_edge(edge) for edge in chosen)
+        )
+        avg_cost = total_cost / max(1, len(chosen))
+        return DecodeResult(
+            chosen, total_cost, matched_to_boundary, avg_cost
+        )
