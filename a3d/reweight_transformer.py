@@ -70,18 +70,21 @@ class GraphEdgeTransformerReweighter:
     Final cost := clamp( effective_cost + alpha * sigmoid(logit), min=1e-6 ).
     """
     def __init__(self, weights_path: str = "", alpha: float = 0.5):
+        if not weights_path:
+            raise ValueError(
+                "transformer reweighting requires an explicitly trained checkpoint; "
+                "untrained random weights are not scientific evidence"
+            )
+        if not TORCH_OK:
+            raise ImportError("PyTorch is required for transformer reweighting")
         self.alpha = float(alpha)
         self.weights_path = weights_path
-        if TORCH_OK:
-            self.model = _TinyEdgeTransformer()
-            if weights_path:
-                try:
-                    self.model.load_state_dict(torch.load(weights_path, map_location="cpu"))
-                except Exception:
-                    pass
-            self.model.eval()
-        else:
-            self.model = None
+        self.model = _TinyEdgeTransformer()
+        state = torch.load(
+            weights_path, map_location="cpu", weights_only=True
+        )
+        self.model.load_state_dict(state, strict=True)
+        self.model.eval()
 
     def reweight(self, graph: DecodingGraph) -> List[float]:
         feats = _edge_features(graph)

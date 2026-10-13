@@ -49,6 +49,10 @@ class DecoderRuntime:
             raise ValueError(f"Expected {nX} X-syndromes, got {len(syndromes_X)}")
         if len(syndromes_Z) != nZ:
             raise ValueError(f"Expected {nZ} Z-syndromes, got {len(syndromes_Z)}")
+        if any(value not in (0, 1) for value in syndromes_X):
+            raise ValueError("X syndrome must contain only binary detector bits")
+        if any(value not in (0, 1) for value in syndromes_Z):
+            raise ValueError("Z syndrome must contain only binary detector bits")
 
     def _weight_dicts_from_cfg(self, sector: str) -> Tuple[
         Dict[Tuple[Tuple[int, int], int], float],
@@ -92,13 +96,14 @@ class DecoderRuntime:
         elif dtype in ("mwpm2","pipelined_mwpm","pmwpm"):
             return self.mwpm2.decode(graph, syn)
         elif dtype in ("mwpm_corr","mwpmc","mwpm3"):
-            # Attach correlation params if configured
-            try:
-                if getattr(self.cfg, "correlation_params", ""):
-                    from .correlation_model import CorrelationParams
-                    self.mwpm_corr._corr_params = CorrelationParams.from_json(self.cfg.correlation_params)
-            except Exception:
-                pass
+            # Invalid correlation parameters must never silently substitute
+            # the decoder defaults for a requested calibrated experiment.
+            if self.cfg.correlation_params:
+                from .correlation_model import CorrelationParams
+
+                self.mwpm_corr._corr_params = CorrelationParams.from_json(
+                    self.cfg.correlation_params
+                )
             return self.mwpm_corr.decode(graph, syn)
         elif dtype in ("uf","unionfind","uf_e"):
             return self.uf_e.decode(graph, syn)
@@ -120,47 +125,46 @@ class DecoderRuntime:
         graph_X = self.builder.build("X", w_space_X, w_time_X, p_erase_X)
         graph_Z = self.builder.build("Z", w_space_Z, w_time_Z, p_erase_Z)
 
-        # Optional cost reweighters (Transformer or BP)
-        rtw = getattr(self.cfg, "reweighter_type", "none")
-        if rtw == "transformer":
-            try:
+        # An enabled reweighter is part of the experiment definition.
+        # Resolve and validate *both* sectors before mutating either graph.
+        # A bad checkpoint or unavailable PyTorch must fail the experiment.
+        rtw = self.cfg.reweighter_type
+        if rtw != "none":
+            if rtw == "transformer":
                 from .reweight_transformer import GraphEdgeTransformerReweighter
-                rw = GraphEdgeTransformerReweighter(weights_path=getattr(self.cfg, "reweighter_weights", ""))
-                # Reweight X
-                new_costs_X = rw.reweight(graph_X)
-                for e, c in zip(graph_X.edges, new_costs_X, strict=True):
-                    object.__setattr__(e, "weight", float(c))
-                # Reweight Z
-                new_costs_Z = rw.reweight(graph_Z)
-                for e, c in zip(graph_Z.edges, new_costs_Z, strict=True):
-                    object.__setattr__(e, "weight", float(c))
-            except Exception:
-                logger.exception("Transformer reweighter failed; continuing with base costs")
 
-        elif rtw == "transformer_sota":
-            try:
+                rw = GraphEdgeTransformerReweighter(
+                    weights_path=self.cfg.reweighter_weights
+                )
+            elif rtw == "transformer_sota":
                 from .reweight_transformer_sota import GraphEdgeTransformerSOTA
-                rw = GraphEdgeTransformerSOTA(weights_path=getattr(self.cfg, "reweighter_weights", ""))
-                new_costs_X = rw.reweight(graph_X)
-                for e, c in zip(graph_X.edges, new_costs_X, strict=True):
-                    object.__setattr__(e, "weight", float(c))
-                new_costs_Z = rw.reweight(graph_Z)
-                for e, c in zip(graph_Z.edges, new_costs_Z, strict=True):
-                    object.__setattr__(e, "weight", float(c))
-            except Exception:
-                logger.exception("SOTA transformer reweighter failed; continuing with base costs")
-        elif rtw == "bp":
-            try:
+
+                rw = GraphEdgeTransformerSOTA(
+                    weights_path=self.cfg.reweighter_weights
+                )
+            elif rtw == "bp":
                 from .reweight_bp import BeliefPropagationReweighter
-                bp = BeliefPropagationReweighter()
-                new_costs_X = bp.reweight(graph_X)
-                for e, c in zip(graph_X.edges, new_costs_X, strict=True):
-                    object.__setattr__(e, "weight", float(c))
-                new_costs_Z = bp.reweight(graph_Z)
-                for e, c in zip(graph_Z.edges, new_costs_Z, strict=True):
-                    object.__setattr__(e, "weight", float(c))
-            except Exception:
-                logger.exception("BP reweighter failed; continuing with base costs")
+
+                rw = BeliefPropagationReweighter()
+            else:
+                raise ValueError(f"unknown reweighter: {rtw}")
+
+            new_costs_x = list(rw.reweight(graph_X))
+            new_costs_z = list(rw.reweight(graph_Z))
+            for axis, graph, costs in (
+                ("X", graph_X, new_costs_x),
+                ("Z", graph_Z, new_costs_z),
+            ):
+                if len(costs) != len(graph.edges):
+                    raise ValueError(f"{axis} reweighter returned incorrect edge count")
+                if not all(np.isfinite(cost) and float(cost) >= 0 for cost in costs):
+                    raise ValueError(f"{axis} reweighter returned invalid edge costs")
+            for graph, costs in (
+                (graph_X, new_costs_x),
+                (graph_Z, new_costs_z),
+            ):
+                for edge, cost in zip(graph.edges, costs, strict=True):
+                    object.__setattr__(edge, "weight", float(cost))
 
 
         t0 = time.perf_counter()
@@ -302,10 +306,25 @@ class DecoderRuntime:
 
 
     def decode_from_softinfo(self, soft_llr_X, soft_llr_Z, leakage_flags=None, **kwargs):
-        # Map LLR to binary syndromes by sign (neg->1, pos->0)
-        sX = [1 if float(v) < 0 else 0 for v in soft_llr_X]
-        sZ = [1 if float(v) < 0 else 0 for v in soft_llr_Z]
-        return self.decode_from_syndromes_uniform(sX, sZ, **kwargs)
+        from .llr_schema import SoftSyndrome, validate_soft
+
+        validate_soft(
+            SoftSyndrome(
+                llr_X=soft_llr_X, llr_Z=soft_llr_Z,
+                leakage_flags=leakage_flags,
+            )
+        )
+        if leakage_flags is not None:
+            raise NotImplementedError(
+                "leakage_flags are not implemented by the binary-sign "
+                "soft-information decoder; refusing to discard them"
+            )
+        # This path is intentionally sign-only, not an analog soft decoder.
+        syndromes_x = [int(float(value) < 0) for value in soft_llr_X]
+        syndromes_z = [int(float(value) < 0) for value in soft_llr_Z]
+        return self.decode_from_syndromes_uniform(
+            syndromes_x, syndromes_z, **kwargs
+        )
 
 
     def decode_from_dem_text(self, dem_text: str, syndrome=None):
