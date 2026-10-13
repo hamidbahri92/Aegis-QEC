@@ -86,6 +86,10 @@ class AegisConfig:
             value = float(getattr(self, name))
             if not (0.0 <= value < 1e6):
                 raise ValueError(f"{name} out of bounds: {value}")
+            if name in {"p_data", "p_meas", "p_leak"} and value >= 1.0:
+                raise ValueError(f"{name} must be a probability below one")
+            if name == "time_weight_scale" and value <= 0.0:
+                raise ValueError("time_weight_scale must be positive")
 
         valid_reweighters = {"none", "transformer", "transformer_sota", "bp"}
         if self.reweighter_type not in valid_reweighters:
