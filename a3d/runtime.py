@@ -173,64 +173,85 @@ class DecoderRuntime:
         resZ = self._decode_with_choice(graph_Z, syndromes_Z, axis="Z")
         t2 = time.perf_counter()
 
-        # Optional decode event logging
-        try:
-            if getattr(self.cfg, "log_events", False):
-                log_decode_events(getattr(self.cfg, "log_path", "logs/decoding_events.csv"), "X", getattr(self.cfg, "decoder_type", "unknown"), len(resX.corrections))
-                log_decode_events(getattr(self.cfg, "log_path", "logs/decoding_events.csv"), "Z", getattr(self.cfg, "decoder_type", "unknown"), len(resZ.corrections))
-        except Exception:
-            pass
+        # Explicitly requested evidence is part of the operation's contract.
+        # A write failure is an error, never an invisible success.
+        if self.cfg.log_events:
+            log_decode_events(
+                self.cfg.log_path, "X", self.cfg.decoder_type,
+                len(resX.corrections),
+            )
+            log_decode_events(
+                self.cfg.log_path, "Z", self.cfg.decoder_type,
+                len(resZ.corrections),
+            )
 
+        if self.cfg.run_certificate:
+            if self.cfg.certificate_mode != "osd":
+                raise ValueError("unsupported certificate_mode")
+            from .certificates import osd_polish
 
-        # Certificates (optional) and confidence scoring
-        try:
-            if getattr(self.cfg, "run_certificate", True) and getattr(self.cfg, "certificate_mode", "osd") == "osd":
-                from .certificates import osd_polish
-                from .decoder_greedy import GreedyMatchingDecoder
-                # polish X
-                gdec = GreedyMatchingDecoder()
-                resX2, improvedX = osd_polish(graph_X, syndromes_X, gdec, resX)
-                if improvedX: resX = resX2
-                # polish Z
-                resZ2, improvedZ = osd_polish(graph_Z, syndromes_Z, gdec, resZ)
-                if improvedZ: resZ = resZ2
-        except Exception:
-            pass
+            gdec = GreedyMatchingDecoder()
+            resX2, improvedX = osd_polish(graph_X, syndromes_X, gdec, resX)
+            if improvedX:
+                resX = resX2
+            resZ2, improvedZ = osd_polish(graph_Z, syndromes_Z, gdec, resZ)
+            if improvedZ:
+                resZ = resZ2
 
-        # Confidence
-        try:
-            from .confidence import confidence_from_cost
-            resX.confidence = float(confidence_from_cost(resX.avg_cost, max(1, len(resX.corrections))))
-            resZ.confidence = float(confidence_from_cost(resZ.avg_cost, max(1, len(resZ.corrections))))
-        except Exception:
-            pass
+        # Never report an uncomputed confidence as though it were valid.
+        from .confidence import confidence_from_cost
 
-        # Profiling (optional)
-        try:
-            if getattr(self.cfg, "profile", False):
-                import csv
-                import os
-                os.makedirs(os.path.dirname(getattr(self.cfg, "profile_path", "logs/profile.csv")), exist_ok=True)
-                with open(getattr(self.cfg, "profile_path", "logs/profile.csv"), "a", newline="", encoding="utf-8") as f:
-                    w = csv.writer(f)
-                    w.writerow(["decode_X_s", t1 - t0, "decode_Z_s", t2 - t1])
-        except Exception:
-            pass
+        resX.confidence = float(
+            confidence_from_cost(
+                resX.avg_cost, max(1, len(resX.corrections))
+            )
+        )
+        resZ.confidence = float(
+            confidence_from_cost(
+                resZ.avg_cost, max(1, len(resZ.corrections))
+            )
+        )
 
-        if getattr(self, "_ml", None) is not None:
-            try:
-                from .decoder_ml import decode_with_gnn
+        if self.cfg.profile:
+            import csv
+            import os
 
-                logitsX = self._ml_logits(graph_X)
-                logitsZ = self._ml_logits(graph_Z)
-                mresX = decode_with_gnn(graph_X, logitsX, threshold=0.6)
-                mresZ = decode_with_gnn(graph_Z, logitsZ, threshold=0.6)
-                if mresX.log_likelihood < resX.log_likelihood and mresX.avg_cost > 0:
-                    resX = mresX
-                if mresZ.log_likelihood < resZ.log_likelihood and mresZ.avg_cost > 0:
-                    resZ = mresZ
-            except Exception:
-                logger.exception("ML fallback failed")
+            profile_path = self.cfg.profile_path
+            os.makedirs(
+                os.path.dirname(os.path.abspath(profile_path)),
+                exist_ok=True,
+            )
+            with open(
+                profile_path, "a", newline="", encoding="utf-8"
+            ) as handle:
+                writer = csv.writer(handle)
+                writer.writerow(
+                    ["decode_X_s", t1 - t0, "decode_Z_s", t2 - t1]
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+
+        if self._ml is not None:
+            from .decoder_ml import decode_with_gnn
+
+            logits_x = self._ml_logits(graph_X)
+            logits_z = self._ml_logits(graph_Z)
+            ml_result_x = decode_with_gnn(
+                graph_X, logits_x, threshold=0.6
+            )
+            ml_result_z = decode_with_gnn(
+                graph_Z, logits_z, threshold=0.6
+            )
+            if (
+                ml_result_x.log_likelihood < resX.log_likelihood
+                and ml_result_x.avg_cost > 0
+            ):
+                resX = ml_result_x
+            if (
+                ml_result_z.log_likelihood < resZ.log_likelihood
+                and ml_result_z.avg_cost > 0
+            ):
+                resZ = ml_result_z
 
         return resX, resZ
 
