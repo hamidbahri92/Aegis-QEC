@@ -133,9 +133,21 @@ def generate_correlated_pauli_errors(
         C = noise_params.get("crosstalk_matrix", None)
         if C is not None:
             C = np.asarray(C, dtype=np.float64)
-            m = min(C.shape[0], n_qubits)
-            kernel[:m, :m] += C[:m, :m]
+            if C.shape != (n_qubits, n_qubits):
+                raise ValueError(
+                    "crosstalk_matrix must match the modeled data-qubit "
+                    "population exactly; provide an explicit qubit mapping"
+                )
+            if not np.all(np.isfinite(C)):
+                raise ValueError("crosstalk_matrix contains nonfinite values")
+            if not np.allclose(C, C.T, rtol=1e-10, atol=1e-12):
+                raise ValueError("crosstalk_matrix must be symmetric")
+            kernel += C
         kernel += np.eye(n_qubits) * 1e-6
+        if float(np.linalg.eigvalsh(kernel)[0]) < -1e-9:
+            raise ValueError(
+                "correlated-noise covariance must be positive semidefinite"
+            )
         prev = np.zeros(n_qubits, dtype=np.float64)
         for t in range(rounds):
             vec = rng.multivariate_normal(
