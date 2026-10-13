@@ -80,6 +80,9 @@ class IBMQuantumInterface(QuantumHardwareInterface):
         result = dict(self._last_cal)
         result["cached"] = True
         result["cache_age_seconds"] = float(now - self._last_fetch_time)
+        result["stale"] = bool(
+            now - self._last_fetch_time >= self.cache_duration
+        )
         return result
 
     def _init_ibm_connection(self) -> None:
@@ -101,16 +104,30 @@ class IBMQuantumInterface(QuantumHardwareInterface):
             t2 = np.array([props.t2(q) for q in range(n)], dtype=np.float64)
             gate_errors = []
             for gate in props.gates:
-                try:
-                    if gate.gate in ("cx", "cz"):
-                        gate_errors.append(float(gate.parameters[0].value))
-                except Exception:
+                if gate.gate not in ("cx", "cz"):
                     continue
-            gate_errors_array = (
-                np.array(gate_errors, dtype=np.float64)
-                if gate_errors
-                else np.array([1e-3], dtype=np.float64)
-            )
+                try:
+                    # IBM's documented accessor is order-independent. The
+                    # first gate parameter might instead be gate_length.
+                    accessor = getattr(props, "gate_error", None)
+                    if callable(accessor) and hasattr(gate, "qubits"):
+                        value = float(accessor(gate.gate, gate.qubits))
+                    else:
+                        error_property = next(
+                            item for item in gate.parameters
+                            if getattr(item, "name", None) == "gate_error"
+                        )
+                        value = float(error_property.value)
+                    if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+                        raise ValueError("invalid backend gate error probability")
+                    gate_errors.append(value)
+                except (AttributeError, StopIteration, TypeError, ValueError):
+                    continue
+            if not gate_errors:
+                raise ValueError(
+                    "backend supplied no measured two-qubit gate error parameters"
+                )
+            gate_errors_array = np.array(gate_errors, dtype=np.float64)
             crosstalk = np.zeros((n, n), dtype=np.float64)
             if hasattr(config, "coupling_map") and config.coupling_map:
                 estimate = float(np.mean(gate_errors_array) * 0.01)
@@ -126,7 +143,19 @@ class IBMQuantumInterface(QuantumHardwareInterface):
                 "base_error_rate": float(np.mean(gate_errors_array)),
                 "timestamp": time.time(),
                 "source": "ibm-backend",
-                "synthetic": False,
+                # This is a *mixed* record. T1/T2 and gate errors are measured;
+                # crosstalk and leakage fields are heuristics/placeholders.
+                "synthetic": True,
+                "hardware_measurements_present": True,
+                "calibration_quality": "mixed_observed_and_modeled",
+                "field_provenance": {
+                    "T1_times": "backend_measured",
+                    "T2_times": "backend_measured",
+                    "gate_errors": "backend_measured",
+                    "base_error_rate": "derived_from_backend_gate_errors",
+                    "crosstalk_matrix": "model_estimate_not_measured",
+                    "leakage_rates": "unmeasured_placeholder",
+                },
                 "backend_name": self.backend_name,
                 "cached": False,
             }
